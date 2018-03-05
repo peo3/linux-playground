@@ -8,6 +8,7 @@
 #include <syscall.h>
 #include <string.h>
 #include <fcntl.h>
+#include <netdb.h>
 
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -15,6 +16,7 @@
 #include <sys/wait.h>
 #include <sys/ioctl.h>
 
+#include <netinet/in.h>
 #include <linux/userfaultfd.h>
 
 /*
@@ -122,6 +124,44 @@ void target(int sock, char *page, int pagesize)
 	printf("target: got \"%s\"\n", page);
 }
 
+int recvpage(char *buf, int pagesize, const char *hostname, int port)
+{
+	int s, ret;
+	struct sockaddr_in addr;
+	struct hostent *host;
+
+	s = socket(AF_INET, SOCK_STREAM, 0);
+	if (s == -1)
+		goto error;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	host = gethostbyname(hostname);
+	if (host == NULL)
+		goto error;
+	memcpy(&addr.sin_addr, host->h_addr, host->h_length);
+
+	ret = connect(s, (struct sockaddr *)&addr, sizeof(addr));
+	if (ret == -1)
+		goto error;
+
+	/* Expect ncat(1) as a peer. */
+	const char *hello = "hello\n";
+	write(s, hello, strlen(hello));
+	ret = read(s, buf, pagesize);
+	if (ret == -1)
+		goto error;
+	close(s);
+	buf[ret - 1] = '\0';  /* Truncate a line break. */
+	return ret;
+
+error:
+	ret = -errno;
+	close(s);
+	return ret;
+}
+
 void die(const char *errstr, int errnum, pid_t pid)
 {
 	kill(pid, SIGTERM);
@@ -131,7 +171,7 @@ void die(const char *errstr, int errnum, pid_t pid)
 }
 
 void manager(int sock, char *page, int pagesize, int targetpid,
-	     const char *str)
+	     const char *hostname, int port)
 {
 	int uffd, ret;
         struct uffdio_copy copy;
@@ -154,8 +194,9 @@ void manager(int sock, char *page, int pagesize, int targetpid,
 	if (buf == NULL)
 		die("malloc", ENOMEM, targetpid);
 
-	memset(buf, 0, pagesize);
-	strncpy(buf, str, strlen(str) + 1);
+	ret = recvpage(buf, pagesize, hostname, port);
+	if (ret < 0)
+		die("recvpage", -ret, targetpid);
 
 	copy.dst = (uint64_t)(uintptr_t)page;
 	copy.src = (uint64_t)(uintptr_t)buf;
@@ -171,11 +212,22 @@ void manager(int sock, char *page, int pagesize, int targetpid,
 
 int main(int argc, char **argv)
 {
-	const char *str = argc == 2 ? argv[1] : "test";
 	const int pagesize = getpagesize();
 	pid_t pid;
 	char *page;
 	int ret, socks[2];
+	const char *hostname;
+	int port;
+
+	if (argc != 3) {
+		printf("usage:\n");
+		printf("\tlaunch ncat(1) (e.g., nc -l -k 127.0.0.1 10000)\n");
+		printf("\tthen run %s (e.g, %s 127.0.0.1 10000)\n", argv[0], argv[0]);
+		printf("\tand type something on nc.\n");
+		exit(1);
+	}
+	hostname = argv[1];
+	port = atoi(argv[2]);
 
 	page = mmap(NULL, pagesize, PROT_READ | PROT_WRITE,
 		    MAP_ANONYMOUS | MAP_SHARED, -1, 0);
@@ -195,7 +247,7 @@ int main(int argc, char **argv)
 	case -1:
 		perror("fork");
 	default:
-		manager(socks[1], page, pagesize, pid, str);
+		manager(socks[1], page, pagesize, pid, hostname, port);
 		return EXIT_SUCCESS;
 	}
 }
