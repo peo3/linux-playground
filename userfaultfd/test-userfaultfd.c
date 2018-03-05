@@ -9,6 +9,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <err.h>
 
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -45,7 +46,7 @@ void sendfd(int s, int fd)
 	msg.msg_controllen = cmsg->cmsg_len;
 
 	if (sendmsg(s, &msg, 0) == -1)
-		perror("sendmsg");
+		err(EXIT_FAILURE, "sendmsg");
 }
 
 int recvfd(int s)
@@ -61,7 +62,7 @@ int recvfd(int s)
 	msg.msg_controllen = sizeof(cbuf);
 
 	if (recvmsg(s, &msg, 0) == -1)
-		perror("recvmsg");
+		err(EXIT_FAILURE, "recvmsg");
 
 	struct cmsghdr * cmsg = CMSG_FIRSTHDR(&msg);
 
@@ -76,7 +77,7 @@ int setup_userfaultfd(int sock, char *page, int pagesize)
 
 	uffd = syscall(__NR_userfaultfd, O_CLOEXEC);
 	if (uffd == -1)
-		perror("userfaultfd");
+		err(EXIT_FAILURE, "userfaultfd");
 
 	api.api = UFFD_API;
 	api.features = 0;
@@ -87,7 +88,7 @@ int setup_userfaultfd(int sock, char *page, int pagesize)
 	 */
 	ret = ioctl(uffd, UFFDIO_API, &api);
 	if (ret == -1)
-		perror("ioctl(UFFDIO_API)");
+		err(EXIT_FAILURE, "ioctl(UFFDIO_API)");
 
 	reg.range.start = (uintptr_t)page;
 	reg.range.len = pagesize;
@@ -95,11 +96,11 @@ int setup_userfaultfd(int sock, char *page, int pagesize)
 
 	ret = ioctl(uffd, UFFDIO_REGISTER, &reg);
 	if (ret == -1)
-		perror("ioctl(UFFDIO_REGISTER)");
+		err(EXIT_FAILURE, "ioctl(UFFDIO_REGISTER)");
 
 	__u64 features = UFFD_API_RANGE_IOCTLS;
 	if ((reg.ioctls & features) != features)
-		perror("ioctl(UFFDIO_REGISTER)");
+		err(EXIT_FAILURE, "ioctl(UFFDIO_REGISTER)");
 
 	return uffd;
 }
@@ -167,7 +168,7 @@ void die(const char *errstr, int errnum, pid_t pid)
 	kill(pid, SIGTERM);
 	waitpid(pid, NULL, 0);
 	errno = errnum;
-	perror(errstr);
+	err(EXIT_FAILURE, errstr);
 }
 
 void manager(int sock, char *page, int pagesize, int targetpid,
@@ -232,11 +233,11 @@ int main(int argc, char **argv)
 	page = mmap(NULL, pagesize, PROT_READ | PROT_WRITE,
 		    MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (page == MAP_FAILED)
-		perror("mmap");
+		err(EXIT_FAILURE, "mmap");
 
 	ret = socketpair(AF_UNIX, SOCK_DGRAM, 0, socks);
 	if (ret == -1)
-		perror("socketpair");
+		err(EXIT_FAILURE, "socketpair");
 
 	/* We need to fork first, then userfaultfd */
 	pid = fork();
@@ -245,7 +246,7 @@ int main(int argc, char **argv)
 		target(socks[0], page, pagesize);
 		return EXIT_SUCCESS;
 	case -1:
-		perror("fork");
+		err(EXIT_FAILURE, "fork");
 	default:
 		manager(socks[1], page, pagesize, pid, hostname, port);
 		return EXIT_SUCCESS;
